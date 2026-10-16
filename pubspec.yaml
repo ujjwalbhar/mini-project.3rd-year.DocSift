@@ -1,0 +1,87 @@
+name: docsift
+description: A secure, offline-first personal knowledge vault with local AI.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.8.1 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Navigation
+  go_router: ^14.6.3
+
+  # State Management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.4.1
+
+  # Database
+  path_provider: ^2.1.5
+  path: ^1.9.1
+
+  # Encryption
+  pointycastle: ^3.9.1
+  flutter_secure_storage: ^9.2.4
+  crypto: ^3.0.6
+
+  # File Handling
+  file_picker: ^8.1.8
+  permission_handler: ^11.4.0
+  share_plus: ^10.1.4
+  open_filex: ^4.6.0
+
+  # PDF Parsing
+  syncfusion_flutter_pdfviewer: ^28.2.10
+  syncfusion_flutter_pdf: ^28.2.10
+
+  # Archive (for DOCX parsing)
+  archive: ^4.3.0
+  xml: ^6.5.0
+
+  # UI
+  google_fonts: ^6.2.1
+  flutter_animate: ^4.5.2
+  lottie: ^3.3.0
+  flutter_svg: ^2.0.18
+
+  # Biometrics
+  local_auth: ^3.0.2
+
+  # Utilities
+  uuid: ^4.5.1
+  intl: ^0.20.2
+  logger: ^2.5.0
+  freezed_annotation: ^3.0.0
+  json_annotation: ^4.9.0
+  equatable: ^2.0.7
+  sqflite_sqlcipher: ^3.3.0
+  onnxruntime: ^1.4.1
+  vector_math: ^2.4.3
+  shared_preferences: ^2.5.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  build_runner: ^2.4.15
+  freezed: ^3.0.0
+  riverpod_generator: ^2.6.5
+  json_serializable: ^6.9.5
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/
+    - assets/images/
+    - assets/animations/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/logo.jpg"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/logo.jpg"

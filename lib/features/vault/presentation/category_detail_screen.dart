@@ -1,9 +1,15 @@
+import 'dart:io';
+import 'package:file_picker/file_picker.dart' as fp;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/router/app_router.dart';
+import '../../auth/data/auth_repository.dart';
+import '../../ocr/domain/extraction_queue.dart';
 import '../../vault/domain/vault_service.dart';
 import '../../vault/domain/models/vault_item.dart';
+import 'dashboard_screen.dart';
 
 /// Category detail screen — loads real items from DB
 class CategoryDetailScreen extends ConsumerWidget {
@@ -48,6 +54,55 @@ class CategoryDetailScreen extends ConsumerWidget {
 
   bool get _isFileBased => categoryId == 'documents' || categoryId == 'media';
 
+  Future<void> _importFileForCategory(BuildContext context, WidgetRef ref) async {
+    ref.read(authRepositoryProvider).isBypassAutoLock = true;
+    fp.FilePickerResult? result;
+    try {
+      result = await fp.FilePicker.platform.pickFiles(
+        type: fp.FileType.custom,
+        allowedExtensions: categoryId == 'media'
+            ? ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic', 'mp4', 'zip']
+            : ['pdf', 'docx', 'doc', 'txt', 'md', 'jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic', 'zip'],
+        allowMultiple: false,
+      );
+    } finally {
+      ref.read(authRepositoryProvider).isBypassAutoLock = false;
+    }
+
+    if (result == null || result.files.isEmpty || result.files.first.path == null) {
+      return;
+    }
+
+    final file = File(result.files.first.path!);
+    try {
+      final newItem = await ref
+          .read(vaultServiceProvider)
+          .importFile(file, categoryId: categoryId);
+      ref.read(extractionQueueProvider).enqueue(newItem);
+      ref.invalidate(vaultItemsProvider);
+      ref.invalidate(recentItemsProvider);
+      ref.invalidate(categoryCountsProvider);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${newItem.name} added to $_title'),
+            backgroundColor: AppColors.accentEmerald,
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Import failed: $e'),
+            backgroundColor: AppColors.destructiveRed,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final itemsAsync = ref.watch(vaultItemsProvider(categoryId));
@@ -70,6 +125,13 @@ class CategoryDetailScreen extends ConsumerWidget {
             color: AppColors.primaryNavy,
           ),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Search Vault',
+            icon: const Icon(Icons.search_rounded, color: AppColors.primaryNavy),
+            onPressed: () => context.push(AppRoutes.search),
+          ),
+        ],
       ),
       body: itemsAsync.when(
         loading: () => const Center(
@@ -89,8 +151,7 @@ class CategoryDetailScreen extends ConsumerWidget {
       floatingActionButton: FloatingActionButton(
         onPressed: () {
           if (_isFileBased) {
-            // For documents/media, go back to dashboard and open add sheet
-            context.pop();
+            _importFileForCategory(context, ref);
           } else {
             context.push('/add/$categoryId');
           }
@@ -131,7 +192,7 @@ class CategoryDetailScreen extends ConsumerWidget {
             const SizedBox(height: 8),
             Text(
               _isFileBased
-                  ? 'Tap + on the dashboard to import a file.'
+                  ? 'Tap + to import a file into $_title.'
                   : 'Tap + to add your first item.',
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 14, color: AppColors.textMuted),
@@ -156,6 +217,8 @@ class CategoryDetailScreen extends ConsumerWidget {
           onDelete: () async {
             await ref.read(vaultServiceProvider).deleteItem(item);
             ref.invalidate(vaultItemsProvider);
+            ref.invalidate(recentItemsProvider);
+            ref.invalidate(categoryCountsProvider);
           },
         );
       },
@@ -238,6 +301,11 @@ class _ItemTile extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (item.isStarred) ...[
+              const Icon(Icons.star_rounded,
+                  size: 16, color: AppColors.categoryCardsColor),
+              const SizedBox(width: 6),
+            ],
             if (item.extractionStatus == ExtractionStatus.processing)
               const SizedBox(
                 width: 16,

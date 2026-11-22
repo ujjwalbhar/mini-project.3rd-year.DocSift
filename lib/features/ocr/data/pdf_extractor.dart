@@ -19,8 +19,10 @@ class PdfExtractor {
     return TextChunker.chunk(fullText, chunkSize: chunkSize);
   }
 
-  /// Extracts full text from all pages of the PDF.
-  static String extractFullText(Uint8List pdfBytes) {
+  /// Extracts embedded digital text for each page (index `0 .. pageCount - 1`).
+  /// Pages with no embedded text (e.g., scanned image pages) yield `''`,
+  /// allowing the caller to run on-device OCR selectively on those pages.
+  static List<String> extractPageTexts(Uint8List pdfBytes) {
     final PdfDocument doc;
     try {
       doc = PdfDocument(inputBytes: pdfBytes);
@@ -28,7 +30,7 @@ class PdfExtractor {
       throw Exception('Failed to parse PDF: $e');
     }
 
-    final buffer = StringBuffer();
+    final pageTexts = <String>[];
     final extractor = PdfTextExtractor(doc);
 
     for (int i = 0; i < doc.pages.count; i++) {
@@ -37,16 +39,19 @@ class PdfExtractor {
           startPageIndex: i,
           endPageIndex: i,
         );
-        if (pageText.trim().isNotEmpty) {
-          buffer.writeln(pageText.trim());
-          buffer.writeln(); // paragraph separator
-        }
+        pageTexts.add(pageText.trim());
       } catch (_) {
-        // Skip pages that fail to extract
+        pageTexts.add('');
       }
     }
 
     doc.dispose();
-    return buffer.toString().trim();
+    return pageTexts;
+  }
+
+  /// Extracts full text from all pages of the PDF.
+  static String extractFullText(Uint8List pdfBytes) {
+    final pages = extractPageTexts(pdfBytes);
+    return pages.where((p) => p.isNotEmpty).join('\n\n').trim();
   }
 }

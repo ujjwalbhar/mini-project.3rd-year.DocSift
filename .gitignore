@@ -46,3 +46,9 @@ app.*.map.json
 /android/build/
 /android/.kotlin/
 build_log.txt
+
+# Large ONNX model binaries & local report build artifacts
+assets/models/*.onnx
+report_build/
+DocSift_Project_Report.docx
+DocSift_Project_Report.pdf

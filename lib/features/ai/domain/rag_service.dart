@@ -76,7 +76,7 @@ class RagService {
       );
     }
 
-    // 1. BM25 Initial Search (Top 10)
+    // 1. BM25 + Title Initial Search
     final bm25Results = await _searchRepo.search(question);
     if (bm25Results.isEmpty) {
       return const RagAnswer(
@@ -86,11 +86,55 @@ class RagService {
       );
     }
 
-    // 2. Generate embedding for the question
-    await _embeddingRepo.generateEmbedding(question);
+    // Separate text-bearing chunks from metadata-only binary matches (e.g. MP4, ZIP)
+    final textCandidates = bm25Results
+        .where(
+          (r) =>
+              !(r.chunkId == null &&
+                  r.chunkContent
+                      .startsWith(SearchRepository.metadataOnlySnippetPrefix)),
+        )
+        .toList();
 
-    // 3. Take top 3 BM25 results as context
-    final topContexts = bm25Results.take(3).toList();
+    if (textCandidates.isEmpty) {
+      final top = bm25Results.first;
+      return RagAnswer(
+        answer:
+            'I found "${top.itemName}" (${top.fileType.toUpperCase()}) in your vault, though this file type does not contain extractable text.',
+        confidence: 0.9,
+        sourceContexts: bm25Results.take(3).toList(),
+      );
+    }
+
+    // 2. Generate embedding for the question and re-rank top candidates via Cosine Similarity
+    final queryEmbedding = await _embeddingRepo.generateEmbedding(question);
+    final candidates = textCandidates.take(10).toList();
+    final scoredCandidates = <MapEntry<SearchResult, double>>[];
+
+    for (final candidate in candidates) {
+      List<double> chunkEmbedding;
+      if (candidate.embedding != null && candidate.embedding!.isNotEmpty) {
+        chunkEmbedding = _embeddingRepo.decodeEmbedding(candidate.embedding!);
+      } else {
+        chunkEmbedding =
+            await _embeddingRepo.generateEmbedding(candidate.chunkContent);
+        if (candidate.chunkId != null && chunkEmbedding.isNotEmpty) {
+          final blob = _embeddingRepo.encodeEmbedding(chunkEmbedding);
+          await _searchRepo.cacheChunkEmbedding(candidate.chunkId!, blob);
+        }
+      }
+      final cosine =
+          _embeddingRepo.cosineSimilarity(queryEmbedding, chunkEmbedding);
+      // Combine BM25 rank signal (negative score where lower is better) with cosine similarity
+      final hybridScore = cosine - (candidate.score * 0.05);
+      scoredCandidates.add(MapEntry(candidate, hybridScore));
+    }
+
+    scoredCandidates.sort((a, b) => b.value.compareTo(a.value));
+
+    // 3. Take top 3 hybrid-ranked results as context
+    final topContexts =
+        scoredCandidates.take(3).map((e) => e.key).toList();
     
     // 4. Build Context String
     final contextBuilder = StringBuffer();

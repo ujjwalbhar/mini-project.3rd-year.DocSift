@@ -1,9 +1,10 @@
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:isolate';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart';
 import 'package:uuid/uuid.dart';
 import '../../auth/data/auth_repository.dart';
@@ -14,13 +15,15 @@ final vaultRepositoryProvider = Provider<VaultRepository>((ref) {
 });
 
 class VaultRepository {
-  VaultRepository(this._authRepo);
+  VaultRepository(this._authRepo, {Directory? vaultRootOverride})
+      : _vaultRootOverride = vaultRootOverride;
 
   final AuthRepository _authRepo;
+  final Directory? _vaultRootOverride;
   final _uuid = const Uuid();
 
-  /// Encrypts a source file and saves it to the secure vault directory.
-  /// Returns the path to the encrypted file.
+  /// Encrypts a source file off-thread via AES-256-GCM and saves it to the
+  /// secure vault directory. Returns the path to the encrypted `.enc` file.
   Future<String> encryptAndStore(File sourceFile) async {
     final vek = _authRepo.vaultEncryptionKey;
     if (vek == null) {
@@ -28,34 +31,23 @@ class VaultRepository {
     }
 
     final sourceBytes = await sourceFile.readAsBytes();
-    
-    // Generate 12-byte IV for GCM
-    final rng = Random.secure();
-    final iv = Uint8List.fromList(List<int>.generate(12, (_) => rng.nextInt(256)));
+    final vekCopy = Uint8List.fromList(vek);
+    final transferablePlain = TransferableTypedData.fromList([sourceBytes]);
+    final transferableKey = TransferableTypedData.fromList([vekCopy]);
 
-    // Set up AES-GCM cipher
-    final cipher = GCMBlockCipher(AESEngine())
-      ..init(
-        true, // encrypt
-        AEADParameters(
-          KeyParameter(Uint8List.fromList(vek)),
-          128, // 16 bytes MAC length
-          iv,
-          Uint8List(0), // empty AAD
-        ),
-      );
+    // Wipe caller-side plaintext & key copies immediately after staging transfer
+    _wipeBytes(sourceBytes);
+    _wipeBytes(vekCopy);
 
-    // Encrypt
-    final ciphertextAndMac = cipher.process(sourceBytes);
-
-    // Format: [12 bytes IV] + [ciphertext + 16 bytes MAC]
-    final finalBytes = BytesBuilder()
-      ..add(iv)
-      ..add(ciphertextAndMac);
+    final transferableEnc = await Isolate.run(
+      () => _encryptBytesIsolate(transferablePlain, transferableKey),
+    );
+    final encryptedPayload = transferableEnc.materialize().asUint8List();
 
     // Store in vault directory
-    final appDocsDir = await getApplicationDocumentsDirectory();
-    final vaultDir = Directory(p.join(appDocsDir.path, 'vault_files'));
+    final baseDir =
+        _vaultRootOverride ?? await getApplicationDocumentsDirectory();
+    final vaultDir = Directory(p.join(baseDir.path, 'vault_files'));
     if (!await vaultDir.exists()) {
       await vaultDir.create(recursive: true);
     }
@@ -64,17 +56,12 @@ class VaultRepository {
     final encryptedPath = p.join(vaultDir.path, encryptedFileName);
 
     final encryptedFile = File(encryptedPath);
-    await encryptedFile.writeAsBytes(finalBytes.toBytes(), flush: true);
-
-    // Wipe plain text bytes from memory
-    for (int i = 0; i < sourceBytes.length; i++) {
-      sourceBytes[i] = 0;
-    }
+    await encryptedFile.writeAsBytes(encryptedPayload, flush: true);
 
     return encryptedPath;
   }
 
-  /// Decrypts a file from the vault directly into memory.
+  /// Decrypts a file from the vault directly into memory on a background isolate.
   /// Ensure you wipe the returned Uint8List when done!
   Future<Uint8List> decryptToMemory(String encryptedPath) async {
     final vek = _authRepo.vaultEncryptionKey;
@@ -88,31 +75,90 @@ class VaultRepository {
     }
 
     final allBytes = await encryptedFile.readAsBytes();
-    
+
     if (allBytes.length < 28) {
       // 12 (IV) + 16 (MAC) = 28 minimum
       throw Exception('Invalid encrypted file format.');
     }
 
-    // Extract IV and ciphertext
-    final iv = allBytes.sublist(0, 12);
-    final ciphertextAndMac = allBytes.sublist(12);
+    final vekCopy = Uint8List.fromList(vek);
+    final transferableEnc = TransferableTypedData.fromList([allBytes]);
+    final transferableKey = TransferableTypedData.fromList([vekCopy]);
+    _wipeBytes(vekCopy);
 
-    // Set up AES-GCM cipher
-    final cipher = GCMBlockCipher(AESEngine())
-      ..init(
-        false, // decrypt
-        AEADParameters(
-          KeyParameter(Uint8List.fromList(vek)),
-          128,
-          iv,
-          Uint8List(0),
-        ),
-      );
+    final transferablePlain = await Isolate.run(
+      () => _decryptBytesIsolate(transferableEnc, transferableKey),
+    );
+    return transferablePlain.materialize().asUint8List();
+  }
 
-    // Decrypt
-    final plaintext = cipher.process(ciphertextAndMac);
-    return plaintext;
+  static TransferableTypedData _encryptBytesIsolate(
+    TransferableTypedData transferablePlain,
+    TransferableTypedData transferableKey,
+  ) {
+    final plain = transferablePlain.materialize().asUint8List();
+    final key = transferableKey.materialize().asUint8List();
+    try {
+      final rng = Random.secure();
+      final iv =
+          Uint8List.fromList(List<int>.generate(12, (_) => rng.nextInt(256)));
+
+      final cipher = GCMBlockCipher(AESEngine())
+        ..init(
+          true, // encrypt
+          AEADParameters(
+            KeyParameter(key),
+            128, // 16 bytes MAC length
+            iv,
+            Uint8List(0), // empty AAD
+          ),
+        );
+
+      final ciphertextAndMac = cipher.process(plain);
+
+      // Format: [12 bytes IV] + [ciphertext + 16 bytes MAC]
+      final out = Uint8List(iv.length + ciphertextAndMac.length);
+      out.setRange(0, iv.length, iv);
+      out.setRange(iv.length, out.length, ciphertextAndMac);
+      return TransferableTypedData.fromList([out]);
+    } finally {
+      _wipeBytes(plain);
+      _wipeBytes(key);
+    }
+  }
+
+  static TransferableTypedData _decryptBytesIsolate(
+    TransferableTypedData transferableEnc,
+    TransferableTypedData transferableKey,
+  ) {
+    final allBytes = transferableEnc.materialize().asUint8List();
+    final key = transferableKey.materialize().asUint8List();
+    try {
+      final iv = Uint8List.sublistView(allBytes, 0, 12);
+      final ciphertextAndMac = Uint8List.sublistView(allBytes, 12);
+
+      final cipher = GCMBlockCipher(AESEngine())
+        ..init(
+          false, // decrypt
+          AEADParameters(
+            KeyParameter(key),
+            128,
+            iv,
+            Uint8List(0),
+          ),
+        );
+
+      final plaintext = cipher.process(ciphertextAndMac);
+      return TransferableTypedData.fromList([plaintext]);
+    } finally {
+      _wipeBytes(key);
+    }
+  }
+
+  static void _wipeBytes(Uint8List bytes) {
+    for (int i = 0; i < bytes.length; i++) {
+      bytes[i] = 0;
+    }
   }
 
   /// Deletes an encrypted file from the filesystem.

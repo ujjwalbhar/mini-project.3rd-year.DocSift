@@ -5,20 +5,28 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/router/app_router.dart';
+import '../../settings/presentation/settings_provider.dart';
+import '../../vault/domain/vault_service.dart';
 import '../data/auth_repository.dart';
 import 'widgets/pin_dot_row.dart';
 import 'widgets/vault_numpad.dart';
 
-/// Screen 3 (isConfirm=false) and Screen 4 (isConfirm=true) — PIN Setup
+/// PIN Setup & Authenticated PIN Change flow:
+/// - Initial onboarding: `Create your PIN` -> `Confirm your PIN`
+/// - Manage PIN (from Settings): `Verify Current PIN` -> `Create New PIN` -> `Confirm your PIN`
 class PinSetupScreen extends ConsumerStatefulWidget {
   const PinSetupScreen({
     super.key,
     required this.isConfirm,
+    this.isVerifyCurrent = false,
     this.firstPin,
+    this.verifiedCurrentPin,
   });
 
   final bool isConfirm;
+  final bool isVerifyCurrent;
   final String? firstPin;
+  final String? verifiedCurrentPin;
 
   @override
   ConsumerState<PinSetupScreen> createState() => _PinSetupScreenState();
@@ -30,10 +38,28 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
   String _errorMsg = '';
   bool _isLoading = false;
 
-  String get _title => widget.isConfirm ? 'Confirm your PIN' : 'Create your PIN';
-  String get _subtitle => widget.isConfirm
-      ? 'Re-enter your 6-digit PIN'
-      : 'Choose a 6-digit PIN to secure your vault';
+  bool get _isChangeFlow =>
+      widget.isVerifyCurrent || widget.verifiedCurrentPin != null;
+
+  String get _title {
+    if (widget.isVerifyCurrent) return 'Verify Current PIN';
+    if (widget.isConfirm) return 'Confirm your PIN';
+    return widget.verifiedCurrentPin != null
+        ? 'Create New PIN'
+        : 'Create your PIN';
+  }
+
+  String get _subtitle {
+    if (widget.isVerifyCurrent) {
+      return 'Enter your current 6-digit PIN to continue';
+    }
+    if (widget.isConfirm) {
+      return 'Re-enter your 6-digit PIN';
+    }
+    return widget.verifiedCurrentPin != null
+        ? 'Choose a new 6-digit PIN for your vault'
+        : 'Choose a 6-digit PIN to secure your vault';
+  }
 
   void _onKey(String key) {
     if (_pin.length >= 6 || _isLoading) return;
@@ -48,19 +74,90 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
   }
 
   void _onBackspace() {
-    if (_pin.isEmpty) return;
+    if (_pin.isEmpty || _isLoading) return;
     HapticFeedback.selectionClick();
     setState(() => _pin = _pin.substring(0, _pin.length - 1));
   }
 
   Future<void> _handleComplete() async {
-    if (!widget.isConfirm) {
-      // Move to confirm screen, pass the PIN as extra
-      if (mounted) context.go(AppRoutes.confirmPin, extra: _pin);
+    final authRepo = ref.read(authRepositoryProvider);
+
+    // Step 0 (Manage PIN only): verify existing PIN before allowing a change
+    if (widget.isVerifyCurrent) {
+      setState(() => _isLoading = true);
+      final lockout = await authRepo.getLockoutStatus();
+      if (lockout.isCoolingDown) {
+        setState(() {
+          _isLoading = false;
+          _hasError = true;
+          _errorMsg =
+              'Too many failed attempts — wait ${lockout.remainingCooldownSeconds}s.';
+          _pin = '';
+        });
+        return;
+      }
+
+      final entered = _pin;
+      final isValid = await authRepo.verifyCurrentPin(entered);
+      if (!mounted) return;
+
+      if (!isValid) {
+        HapticFeedback.vibrate();
+        final status = await authRepo.recordFailedAttempt();
+        final maxAttempts = ref.read(maxFailedAttemptsProvider);
+        if (status.failedAttempts >= maxAttempts) {
+          await ref.read(vaultServiceProvider).factoryReset();
+          await authRepo.destroyVault();
+          if (!mounted) return;
+          context.go(AppRoutes.splash);
+          return;
+        }
+        setState(() {
+          _isLoading = false;
+          _hasError = true;
+          _errorMsg = status.isCoolingDown
+              ? 'Too many attempts — wait ${status.remainingCooldownSeconds}s (${status.failedAttempts}/$maxAttempts)'
+              : 'Incorrect current PIN (${status.failedAttempts}/$maxAttempts)';
+          _pin = '';
+        });
+        return;
+      }
+
+      await authRepo.resetFailedAttempts();
+      setState(() {
+        _isLoading = false;
+        _pin = '';
+      });
+      if (mounted) {
+        context.push(
+          AppRoutes.createPin,
+          extra: <String, dynamic>{'currentPin': entered},
+        );
+      }
       return;
     }
 
-    // Confirm step — validate
+    // Step 1: Enter new PIN -> push Confirm screen
+    if (!widget.isConfirm) {
+      final entered = _pin;
+      setState(() => _pin = '');
+      if (mounted) {
+        if (widget.verifiedCurrentPin != null) {
+          context.push(
+            AppRoutes.confirmPin,
+            extra: <String, dynamic>{
+              'firstPin': entered,
+              'currentPin': widget.verifiedCurrentPin,
+            },
+          );
+        } else {
+          context.push(AppRoutes.confirmPin, extra: entered);
+        }
+      }
+      return;
+    }
+
+    // Step 2: Confirm step — validate match
     if (_pin != widget.firstPin) {
       HapticFeedback.vibrate();
       setState(() {
@@ -71,11 +168,33 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
       return;
     }
 
-    // Save
     setState(() => _isLoading = true);
     try {
-      await ref.read(authRepositoryProvider).setupPin(_pin);
-      if (mounted) context.go(AppRoutes.dashboard);
+      if (widget.verifiedCurrentPin != null) {
+        final changed =
+            await authRepo.changePin(widget.verifiedCurrentPin!, _pin);
+        if (!changed) {
+          setState(() {
+            _hasError = true;
+            _errorMsg = 'Current PIN verification failed. Please try again.';
+            _isLoading = false;
+            _pin = '';
+          });
+          return;
+        }
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PIN updated successfully'),
+            backgroundColor: AppColors.accentEmerald,
+          ),
+        );
+        context.go(AppRoutes.settings);
+      } else {
+        await authRepo.setupPin(_pin);
+        if (!mounted) return;
+        context.go(AppRoutes.dashboard);
+      }
     } catch (_) {
       setState(() {
         _hasError = true;
@@ -101,20 +220,38 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
                   IconButton(
                     icon: const Icon(Icons.arrow_back_ios_rounded, size: 20),
                     color: AppColors.textPrimary,
-                    onPressed: () => context.pop(),
+                    onPressed: () {
+                      if (context.canPop()) {
+                        context.pop();
+                      } else {
+                        context.go(
+                          _isChangeFlow
+                              ? AppRoutes.settings
+                              : AppRoutes.onboarding,
+                        );
+                      }
+                    },
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 16),
-            // Step indicator
+            // Step indicator (3 dots for Manage PIN, 2 dots for initial setup)
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _StepDot(active: true),
-                const SizedBox(width: 8),
-                _StepDot(active: widget.isConfirm),
-              ],
+              children: _isChangeFlow
+                  ? [
+                      const _StepDot(active: true),
+                      const SizedBox(width: 8),
+                      _StepDot(active: !widget.isVerifyCurrent),
+                      const SizedBox(width: 8),
+                      _StepDot(active: widget.isConfirm),
+                    ]
+                  : [
+                      const _StepDot(active: true),
+                      const SizedBox(width: 8),
+                      _StepDot(active: widget.isConfirm),
+                    ],
             ),
             const SizedBox(height: 32),
             // Title

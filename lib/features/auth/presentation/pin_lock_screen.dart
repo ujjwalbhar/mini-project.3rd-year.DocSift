@@ -1,17 +1,22 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/router/app_router.dart';
+import '../../autofill/autofill_sync_service.dart';
+import '../../ocr/domain/extraction_queue.dart';
 import '../../settings/presentation/settings_provider.dart';
 import '../../vault/domain/vault_service.dart';
+import '../../vault/presentation/dashboard_screen.dart';
 import '../data/auth_repository.dart';
 import 'widgets/pin_dot_row.dart';
 import 'widgets/vault_numpad.dart';
 
-/// Screen 5 — Immersive deep navy lock screen per design.md
+/// Screen 5 — Immersive deep navy lock screen
 class PinLockScreen extends ConsumerStatefulWidget {
   const PinLockScreen({super.key});
 
@@ -25,6 +30,8 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
   bool _isLoading = false;
   bool _hasError = false;
   int _attempts = 0;
+  int _cooldownSeconds = 0;
+  Timer? _cooldownTimer;
   late AnimationController _shakeCtrl;
 
   @override
@@ -34,16 +41,59 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
       vsync: this,
       duration: const Duration(milliseconds: 400),
     );
+    _restoreLockoutAndPromptBiometric();
+  }
+
+  Future<void> _restoreLockoutAndPromptBiometric() async {
+    final authRepo = ref.read(authRepositoryProvider);
+    final lockout = await authRepo.getLockoutStatus();
+    if (!mounted) return;
+
+    if (lockout.failedAttempts > 0 || lockout.isCoolingDown) {
+      setState(() {
+        _attempts = lockout.failedAttempts;
+        _hasError = lockout.failedAttempts > 0;
+      });
+      if (lockout.isCoolingDown) {
+        _startCooldown(lockout.remainingCooldownSeconds);
+        return;
+      }
+    }
+
+    // Read persisted biometric preference directly to avoid cold-start async race
+    final prefs = await SharedPreferences.getInstance();
+    final bioEnabled = prefs.getBool('docsift_biometrics_enabled') ?? false;
+    if (mounted && bioEnabled) {
+      _handleBiometric();
+    }
   }
 
   @override
   void dispose() {
+    _cooldownTimer?.cancel();
     _shakeCtrl.dispose();
     super.dispose();
   }
 
+  void _startCooldown(int seconds) {
+    _cooldownTimer?.cancel();
+    setState(() => _cooldownSeconds = seconds);
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_cooldownSeconds <= 1) {
+        timer.cancel();
+        setState(() => _cooldownSeconds = 0);
+      } else {
+        setState(() => _cooldownSeconds--);
+      }
+    });
+  }
+
   void _onKey(String key) {
-    if (_pin.length >= 6 || _isLoading) return;
+    if (_pin.length >= 6 || _isLoading || _cooldownSeconds > 0) return;
     HapticFeedback.lightImpact();
     setState(() {
       _pin += key;
@@ -55,44 +105,74 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
   }
 
   void _onBackspace() {
-    if (_pin.isEmpty) return;
+    if (_pin.isEmpty || _isLoading || _cooldownSeconds > 0) return;
     HapticFeedback.selectionClick();
     setState(() => _pin = _pin.substring(0, _pin.length - 1));
   }
 
+  void _onUnlockSucceeded() {
+    if (ref.read(ocrProcessingEnabledProvider)) {
+      ref.read(extractionQueueProvider).resumePending();
+    }
+    // Import any credentials captured via OS Autofill & sync vault index
+    ref
+        .read(autofillSyncServiceProvider)
+        .syncVaultAndImportCapturedLogins()
+        .then((importedCount) {
+      if (importedCount > 0) {
+        ref.invalidate(vaultItemsProvider);
+        ref.invalidate(recentItemsProvider);
+        ref.invalidate(categoryCountsProvider);
+      }
+    });
+    context.go(AppRoutes.dashboard);
+  }
+
   Future<void> _handleUnlock() async {
+    if (_cooldownSeconds > 0) return;
     setState(() => _isLoading = true);
-    final success = await ref.read(authRepositoryProvider).unlock(_pin);
+    final authRepo = ref.read(authRepositoryProvider);
+    final success = await authRepo.unlock(_pin);
 
     if (!mounted) return;
 
     if (success) {
-      context.go(AppRoutes.dashboard);
+      _onUnlockSucceeded();
       return;
     }
 
     HapticFeedback.vibrate();
     _shakeCtrl.forward(from: 0);
-    _attempts++;
 
-    final maxAttempts = ref.read(maxFailedAttemptsProvider);
+    final fallbackMax = ref.read(maxFailedAttemptsProvider);
+    final status = await authRepo.recordFailedAttempt();
+    final prefs = await SharedPreferences.getInstance();
+    final int maxAttempts =
+        prefs.getInt('docsift_max_failed_attempts') ?? fallbackMax;
 
-    if (_attempts >= maxAttempts) {
-      // Trigger factory reset
+    if (status.failedAttempts >= maxAttempts) {
+      // Trigger zero-trust factory reset
       await ref.read(vaultServiceProvider).factoryReset();
       if (!mounted) return;
       context.go(AppRoutes.splash);
       return;
     }
 
+    if (!mounted) return;
     setState(() {
+      _attempts = status.failedAttempts;
       _hasError = true;
       _pin = '';
       _isLoading = false;
     });
+
+    if (status.isCoolingDown) {
+      _startCooldown(status.remainingCooldownSeconds);
+    }
   }
 
   Future<void> _handleBiometric() async {
+    if (_cooldownSeconds > 0) return;
     setState(() => _isLoading = true);
     final success = await ref
         .read(authRepositoryProvider)
@@ -101,7 +181,7 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
     if (!mounted) return;
 
     if (success) {
-      context.go(AppRoutes.dashboard);
+      _onUnlockSucceeded();
       return;
     }
 
@@ -112,6 +192,8 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
 
   @override
   Widget build(BuildContext context) {
+    final biometricsEnabled = ref.watch(biometricsEnabledProvider);
+
     return Scaffold(
       backgroundColor: AppColors.lockScreenBg, // #2B3C5A
       body: SafeArea(
@@ -145,20 +227,23 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
               },
               child: PinDotRow(filled: _pin.length, hasError: _hasError),
             ),
-            if (_hasError) ...[
+            if (_hasError || _cooldownSeconds > 0) ...[
               const SizedBox(height: 14),
               Consumer(
                 builder: (context, ref, child) {
                   final maxAttempts = ref.watch(maxFailedAttemptsProvider);
+                  final msg = _cooldownSeconds > 0
+                      ? 'Too many attempts — wait ${_cooldownSeconds}s ($_attempts/$maxAttempts)'
+                      : 'Incorrect PIN — $_attempts/$maxAttempts attempts';
                   return Text(
-                    'Incorrect PIN — $_attempts/$maxAttempts attempts',
+                    msg,
                     style: const TextStyle(
                       fontSize: 13,
                       color: Color(0xFFFF8A80),
                       fontWeight: FontWeight.w500,
                     ),
                   ).animate().fadeIn();
-                }
+                },
               ),
             ],
             const Spacer(),
@@ -176,8 +261,10 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
                 onKey: _onKey,
                 onBackspace: _onBackspace,
                 isDarkMode: true,
-                showBiometric: true,
-                onBiometric: _handleBiometric,
+                showBiometric: biometricsEnabled && _cooldownSeconds == 0,
+                onBiometric: (biometricsEnabled && _cooldownSeconds == 0)
+                    ? _handleBiometric
+                    : null,
               ),
             const SizedBox(height: 32),
           ],
@@ -205,6 +292,11 @@ class _PinLockScreenState extends ConsumerState<PinLockScreen>
             child: Image.asset(
               'assets/logo.jpg',
               fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const Icon(
+                Icons.shield_rounded,
+                color: AppColors.accentEmerald,
+                size: 40,
+              ),
             ),
           ),
         ),

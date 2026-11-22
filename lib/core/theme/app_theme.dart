@@ -138,8 +138,23 @@ class AppTheme {
         chipTheme: ChipThemeData(
           backgroundColor: AppColors.surfaceNeutral,
           selectedColor: AppColors.accentEmeraldLight,
-          labelStyle: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500),
-          side: BorderSide.none,
+          surfaceTintColor: Colors.transparent,
+          checkmarkColor: AppColors.accentEmeraldDark,
+          iconTheme: const IconThemeData(
+            color: AppColors.primaryNavy,
+            size: 16,
+          ),
+          labelStyle: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: AppColors.textPrimary,
+          ),
+          secondaryLabelStyle: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: AppColors.accentEmeraldDark,
+          ),
+          side: const BorderSide(color: AppColors.borderLight),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         ),

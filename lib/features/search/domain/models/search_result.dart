@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 class SearchResult {
   const SearchResult({
     required this.vaultItemId,
@@ -5,6 +7,8 @@ class SearchResult {
     required this.fileType,
     required this.chunkContent,
     required this.score,
+    this.chunkId,
+    this.embedding,
   });
 
   final String vaultItemId;
@@ -12,4 +16,6 @@ class SearchResult {
   final String fileType;
   final String chunkContent;
   final double score;
+  final String? chunkId;
+  final Uint8List? embedding;
 }

@@ -12,14 +12,17 @@ import '../../vault/domain/vault_service.dart';
 import '../../vault/domain/models/vault_item.dart';
 
 import '../../auth/data/auth_repository.dart';
+import '../../settings/presentation/settings_provider.dart';
 
 // ─── Providers ────────────────────────────────────────────────────────────────
 
 final recentItemsProvider = FutureProvider<List<VaultItem>>((ref) {
+  ref.watch(vaultItemsProvider(null));
   return ref.read(vaultServiceProvider).getRecentItems(limit: 6);
 });
 
 final categoryCountsProvider = FutureProvider<Map<String, int>>((ref) {
+  ref.watch(vaultItemsProvider(null));
   return ref.read(vaultServiceProvider).getCategoryCounts();
 });
 
@@ -45,7 +48,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     try {
       result = await fp.FilePicker.platform.pickFiles(
         type: fp.FileType.custom,
-        allowedExtensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'jpg', 'jpeg', 'png', 'mp4', 'zip'],
+        allowedExtensions: [
+          'pdf', 'docx', 'doc', 'txt', 'md',
+          'jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic',
+          'mp4', 'zip',
+        ],
         allowMultiple: false,
       );
     } finally {
@@ -152,6 +159,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   // ─── App Bar ──────────────────────────────────────────────────────────────
   Widget _buildAppBar() {
+    final userName = ref.watch(vaultUserNameProvider);
     return SliverToBoxAdapter(
       child: Container(
         color: AppColors.cardCanvas,
@@ -163,7 +171,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    _greeting(),
+                    _greeting(userName),
                     style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w600,
@@ -364,11 +372,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
-  String _greeting() {
+  String _greeting(String userName) {
     final h = DateTime.now().hour;
-    if (h < 12) return 'Good morning, User!';
-    if (h < 17) return 'Good afternoon, User!';
-    return 'Good evening, User!';
+    if (h < 12) return 'Good morning, $userName!';
+    if (h < 17) return 'Good afternoon, $userName!';
+    return 'Good evening, $userName!';
   }
 
   List<Map<String, dynamic>> _categoryMeta() => [

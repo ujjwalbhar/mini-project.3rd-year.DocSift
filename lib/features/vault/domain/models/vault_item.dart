@@ -179,6 +179,9 @@ FileType fileTypeFromExtension(String ext) {
     case 'png':
     case 'webp':
     case 'gif':
+    case 'bmp':
+    case 'heic':
+    case 'heif':
       return FileType.image;
     case 'mp4':
     case 'mov':
@@ -192,5 +195,22 @@ FileType fileTypeFromExtension(String ext) {
       return FileType.zip;
     default:
       return FileType.other;
+  }
+}
+
+/// Returns true if [type] supports text/OCR indexing for search & AI Q&A.
+bool isExtractableFileType(FileType type) {
+  switch (type) {
+    case FileType.pdf:
+    case FileType.docx:
+    case FileType.txt:
+    case FileType.md:
+    case FileType.json:
+    case FileType.image:
+      return true;
+    case FileType.video:
+    case FileType.zip:
+    case FileType.other:
+      return false;
   }
 }

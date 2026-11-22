@@ -62,7 +62,7 @@ class OnboardingScreen extends StatelessWidget {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () => context.go(AppRoutes.createPin),
+                  onPressed: () => context.push(AppRoutes.createPin),
                   child: const Text('Get Started'),
                 ),
               ).animate().fadeIn(delay: 700.ms, duration: 400.ms).slideY(
@@ -74,7 +74,7 @@ class OnboardingScreen extends StatelessWidget {
                   ),
               const SizedBox(height: 16),
               TextButton(
-                onPressed: () => context.go(AppRoutes.createPin),
+                onPressed: () => context.push(AppRoutes.createPin),
                 child: const Text('Skip'),
               ).animate().fadeIn(delay: 800.ms),
               const SizedBox(height: 24),

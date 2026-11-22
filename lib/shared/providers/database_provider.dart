@@ -32,6 +32,25 @@ class DatabaseProvider {
     return _db!;
   }
 
+  /// Flushes and closes the active SQLCipher database handle without deleting
+  /// any files, allowing safe atomic backup snapshots or restore replacement.
+  Future<void> closeDatabase() async {
+    if (_db != null) {
+      await _db!.close();
+      _db = null;
+    }
+  }
+
+  /// Reads the active SQLCipher encryption key from secure storage.
+  Future<String?> readDbEncryptionKey() async {
+    return _storage.read(key: _dbKeyStorageKey);
+  }
+
+  /// Replaces the SQLCipher encryption key in secure storage during backup restore.
+  Future<void> writeDbEncryptionKey(String dbKey) async {
+    await _storage.write(key: _dbKeyStorageKey, value: dbKey);
+  }
+
   Future<Database> _initDb() async {
     final docsDir = await getApplicationDocumentsDirectory();
     final dbPath = join(docsDir.path, 'docsift_vault.db');
@@ -100,7 +119,7 @@ class DatabaseProvider {
     return await openDatabase(
       dbPath,
       password: dbKey,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         // Vault Items table
         await db.execute('''
@@ -169,11 +188,25 @@ class DatabaseProvider {
         ''');
         
         await db.execute('''
-          CREATE TRIGGER text_chunks_au AFTER UPDATE ON text_chunks BEGIN
+          CREATE TRIGGER text_chunks_au AFTER UPDATE OF content ON text_chunks BEGIN
             INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.rowid, old.content);
             INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
           END;
         ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          // Clear legacy pre-WordPiece hash embeddings so chunks re-embed cleanly
+          // with genuine MiniLM / deterministic FNV-1a vectors on next query.
+          await db.execute('UPDATE text_chunks SET embedding = NULL');
+          await db.execute('DROP TRIGGER IF EXISTS text_chunks_au');
+          await db.execute('''
+            CREATE TRIGGER text_chunks_au AFTER UPDATE OF content ON text_chunks BEGIN
+              INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+              INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
+            END;
+          ''');
+        }
       },
       onConfigure: (db) async {
         // Enable foreign keys

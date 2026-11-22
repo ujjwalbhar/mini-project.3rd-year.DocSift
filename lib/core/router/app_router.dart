@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/auth/data/auth_repository.dart';
 import '../../features/auth/presentation/splash_screen.dart';
 import '../../features/auth/presentation/onboarding_screen.dart';
 import '../../features/auth/presentation/pin_setup_screen.dart';
@@ -18,6 +19,7 @@ class AppRoutes {
   static const String onboarding = '/onboarding';
   static const String createPin = '/create-pin';
   static const String confirmPin = '/confirm-pin';
+  static const String changePin = '/change-pin';
   static const String lock = '/lock';
   static const String dashboard = '/dashboard';
   static const String aiChat = '/ai-chat';
@@ -32,6 +34,28 @@ class AppRoutes {
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: AppRoutes.splash,
+    redirect: (context, state) {
+      final loc = state.matchedLocation;
+      final authRepo = ref.read(authRepositoryProvider);
+
+      if (authRepo.isLocked) {
+        if (loc == AppRoutes.splash || loc == AppRoutes.lock) {
+          return null;
+        }
+        // Onboarding & initial PIN creation are reachable ONLY before a PIN exists
+        const initialSetupRoutes = {
+          AppRoutes.onboarding,
+          AppRoutes.createPin,
+          AppRoutes.confirmPin,
+        };
+        if (!authRepo.hasPinConfiguredSync &&
+            initialSetupRoutes.contains(loc)) {
+          return null;
+        }
+        return AppRoutes.lock;
+      }
+      return null;
+    },
     routes: [
       GoRoute(
         path: AppRoutes.splash,
@@ -42,14 +66,43 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const OnboardingScreen(),
       ),
       GoRoute(
+        path: AppRoutes.changePin,
+        builder: (context, state) => const PinSetupScreen(
+          isConfirm: false,
+          isVerifyCurrent: true,
+        ),
+      ),
+      GoRoute(
         path: AppRoutes.createPin,
-        builder: (context, state) => const PinSetupScreen(isConfirm: false),
+        builder: (context, state) {
+          final extra = state.extra;
+          String? currentPin;
+          if (extra is Map<String, dynamic>) {
+            currentPin = extra['currentPin'] as String?;
+          }
+          return PinSetupScreen(
+            isConfirm: false,
+            verifiedCurrentPin: currentPin,
+          );
+        },
       ),
       GoRoute(
         path: AppRoutes.confirmPin,
         builder: (context, state) {
-          final firstPin = state.extra as String? ?? '';
-          return PinSetupScreen(isConfirm: true, firstPin: firstPin);
+          final extra = state.extra;
+          String firstPin = '';
+          String? currentPin;
+          if (extra is String) {
+            firstPin = extra;
+          } else if (extra is Map<String, dynamic>) {
+            firstPin = (extra['firstPin'] as String?) ?? '';
+            currentPin = extra['currentPin'] as String?;
+          }
+          return PinSetupScreen(
+            isConfirm: true,
+            firstPin: firstPin,
+            verifiedCurrentPin: currentPin,
+          );
         },
       ),
       GoRoute(

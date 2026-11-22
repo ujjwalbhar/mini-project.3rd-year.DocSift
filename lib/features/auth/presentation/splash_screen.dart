@@ -62,6 +62,15 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
                   child: Image.asset(
                     'assets/logo.jpg',
                     fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      color: AppColors.accentEmerald,
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.verified_user_rounded,
+                        color: Colors.white,
+                        size: 56,
+                      ),
+                    ),
                   ),
                 ),
               )
